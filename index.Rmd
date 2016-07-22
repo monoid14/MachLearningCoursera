@@ -1,0 +1,265 @@
+---
+title: "Classifying Exercises According to Manner of Execution - Course Project"
+author: "Yannis Stavrakas"
+output: html_document
+---
+
+
+# Objectives
+
+This is a report created as part of an assignment for a Machine Learning class. 
+Two datasets are provided, one containing training data (<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>), and the other containing 
+test data (<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>). 
+The datasets contain measurements from accelerometers on 6 participants while they 
+perform exercises in a number of different (correct and incorrect) manners (more 
+details available at <http://groupware.les.inf.puc-rio.br/har>). 
+Those *manners*, or **classes**, are provided for the training data, but not for the test data. 
+The objective of the project is to use the training dataset in order to predict 
+correctly the class for each case in the test dataset.
+
+
+#Exploratory Analysis and Preprocessing
+
+We load the training and test datasets.
+```{r echo=TRUE}
+training <- read.csv("./pml-training.csv")
+testing <- read.csv("./pml-testing.csv")
+```
+
+After a preliminary exploration, we see that the **training set** has `r nrow(training)` 
+lines (each containing measurements for a single exercise) and `r length(names(training))` columns. The last column is called *`r names(training)[length(names(training))]`* and indicates the class for each of the exercises. The **test set**, respectively, consists of `r nrow(testing)` 
+lines and again of `r length(names(testing))` columns. 
+The last column of the test set is called *`r names(testing)[length(names(testing))]`* instead of *classe* and is 
+actually a counter, just like the first column of both the training and the test 
+datasets. The rest of the columns are the same in both sets.
+
+We now check how the training set is distributed w.r.t. the participants and the *classe* variable.
+```{r distribution_plot, echo=TRUE, fig.height=4}
+suppressWarnings(library(ggplot2))
+qplot(X, user_name, colour = classe, data = training,         #Figure 1
+      main = "Training set distribution", xlab = "Index", ylab = "Participant")
+```
+
+We see that the order of the dataset (index) follows the class of the exercises, while exercises of the same class by one participant are clustered together. We also see that there is no obvious bias in the number of exercises per class and per participant.
+
+By examining the test set we see that there is a factor variable called *new_window* 
+with **only one level**, plus a few integer variables containing timestamps. To avoid dealing with time, we will make the reasonable assumption that the way exercises are performed is independent of the time they are performed. We remove the variables mentioned above from both datasets. We also remove the initial *X* variable from both sets, plus the *problem_id* from the test set, which are just counters.
+```{r echo=TRUE}
+training <- training[ , c(-1, -3:-6)]      #X, timestamp*, new_window
+testing <- testing[ , c(-1, -3:-6, -160)]  #X, timestamp*, new_window, problem_id
+```
+
+Further examination of the test set reveals that there are two groups of columns, those that consist entirely of **NAs** and those that do not contain NAs **at all**.
+```{r echo=TRUE}
+unique(colSums(is.na(testing)))
+```
+
+There are **`r sum(colSums(is.na(testing)) == 0)` columns** in the test set that do not contain NAs at all.   
+Next, we remove the **NA** columns from both sets, after having verified that all the remaining columns in the **training set** are NA free as well. 
+
+```{r echo=TRUE}
+col.idx <- which(colSums(is.na(testing)) == 0)  #columns with 0 NAs
+#see if all those columns are clear of NAs in training set
+sum(colSums(is.na(training[ , col.idx])) == 0)  #all 54 columns are NA free
+#select only columns without NAs in both sets
+testing <- testing[ , col.idx]
+training <- training[ , c(col.idx, 155)]  #keep classe variable in training
+```
+
+We convert *integer* data types to *numeric*, for consistency with later functions.
+```{r echo=TRUE}
+testing[ , 2:54] <- sapply(testing[ , 2:54], as.numeric)
+training[ , 2:54] <- sapply(training[ , 2:54], as.numeric)
+```
+
+Finally, we check the correlation of the variables and find that more than 1/3 (19 out of the 53) of the variables are highly correlated.
+```{r echo=TRUE}
+feat.corr <- abs(cor(training[ , c(-1, -55)]))  #do not include factor user_name
+diag(feat.corr) <- 0
+high.corr <- which (feat.corr > 0.8, arr.ind = TRUE)
+nrow(high.corr) / 2    #19 highly correlated features out of 53
+```
+
+
+# Classification Models
+
+Since we have highly non-linear and complex relationships between features we will opt for decision trees rather than model based approaches. As a first approach we will train a **classification tree** because of its ease of interpretability, and then we will train a **random forest** because of its accurate performance.
+
+We will use **cross validation** to pick the best value for the model parameters. In the classification tree we will use cross validation to select the best value for the *cp* parameter, which controls the pruning of the tree. In the random forest we will use cross validation to select the best value for the *mtry* parameter, which specifies the number of features that randomly participate in each split.
+
+In order to compare the two models (classification tree and random forest) we will use a **separate validation set** to estimate the **out of sample accuracy**. Next, we split the training set to training and validation.
+```{r echo=TRUE, warning=FALSE, message=FALSE}
+#load libraries needed
+library(caret)
+library(rpart)
+library(randomForest)
+library(rpart.plot)
+library(rattle)
+#set seed globally for reproducibility
+set.seed(1100)
+#split training to training and validation
+inTrain = createDataPartition(training$classe, p = 0.75, list = FALSE)
+validation = training[-inTrain, ]
+training = training[inTrain, ]
+```
+
+
+## Classification Tree
+
+We train a number of classification trees for different values of the parameter *cp*, and we use **cross validation** to estimate their accuracy and select the best one.
+```{r classtree_model, echo=TRUE, cache=TRUE}
+#time consuming, store in cache
+ctree.030000 <- train(classe ~ ., data = training, method = "rpart", 
+                      tuneGrid = data.frame(cp = 0.030000), 
+                      trControl = trainControl(method = "cv", number = 5))
+ctree.001000 <- train(classe ~ ., data = training, method = "rpart", 
+                      tuneGrid = data.frame(cp = 0.001000), 
+                      trControl = trainControl(method = "cv", number = 5))
+ctree.000100 <- train(classe ~ ., data = training, method = "rpart", 
+                      tuneGrid = data.frame(cp = 0.000100), 
+                      trControl = trainControl(method = "cv", number = 5))
+ctree.000080 <- train(classe ~ ., data = training, method = "rpart", 
+                      tuneGrid = data.frame(cp = 0.000080), 
+                      trControl = trainControl(method = "cv", number = 5))
+ctree.000050 <- train(classe ~ ., data = training, method = "rpart", 
+                      tuneGrid = data.frame(cp = 0.000050), 
+                      trControl = trainControl(method = "cv", number = 5))
+ctree.000030 <- train(classe ~ ., data = training, method = "rpart", 
+                      tuneGrid = data.frame(cp = 0.000030), 
+                      trControl = trainControl(method = "cv", number = 5))
+ctree.000010 <- train(classe ~ ., data = training, method = "rpart", 
+                      tuneGrid = data.frame(cp = 0.000010), 
+                      trControl = trainControl(method = "cv", number = 5))
+ctree.000008 <- train(classe ~ ., data = training, method = "rpart", 
+                      tuneGrid = data.frame(cp = 0.000008), 
+                      trControl = trainControl(method = "cv", number = 5))
+ctree.000005 <- train(classe ~ ., data = training, method = "rpart", 
+                      tuneGrid = data.frame(cp = 0.000005), 
+                      trControl = trainControl(method = "cv", number = 5))
+ctree.000001 <- train(classe ~ ., data = training, method = "rpart", 
+                      tuneGrid = data.frame(cp = 0.000001), 
+                      trControl = trainControl(method = "cv", number = 5))
+```
+
+We compare the accuracies of the random forests, to select the best w.r.t. *accuracy* and *kappa*. Based on the table below, we select as the best model the one with *cp = 0.000080*.
+```{r echo=TRUE}
+cp.comp <- rbind(ctree.030000$results, ctree.001000$results, ctree.000100$results, 
+                 ctree.000080$results, ctree.000050$results, ctree.000030$results, 
+                 ctree.000010$results, ctree.000008$results, ctree.000005$results, 
+                 ctree.000001$results)
+cp.comp
+ctree.best <- ctree.000080   #best model for cp = 0.000080
+```
+
+We have used cross validation to decide the model parameters (*cp*). In the next section we will use the validation set to estimate the out of sample accuracy.
+
+The best model is too complex to present in a plot, so the following plot depicts its prunned version for *cp = 0.03*.
+```{r classtree_plot, echo=TRUE, fig.height=6.5, fig.width=9}
+fancyRpartPlot(prune(ctree.best$finalModel, cp = 0.03), 
+               main = "Classification tree", sub = "")     #Figure 2
+```
+
+
+## Random Forest
+
+We train a number of random forests for different values of the parameter *mtry*, and we use **cross validation** to estimate their accuracy and select the best one.
+```{r randomforest_model, echo=TRUE, cache=TRUE}
+#time consuming, cache results
+rf.54 <- train(training[ , -55], training[ , 55], importance = TRUE, 
+               tuneGrid = data.frame(mtry = 54), 
+               trControl = trainControl(method = "cv", number = 5))
+rf.35 <- train(training[ , -55], training[ , 55], importance = TRUE, 
+               tuneGrid = data.frame(mtry = 35), 
+               trControl = trainControl(method = "cv", number = 5))
+rf.25 <- train(training[ , -55], training[ , 55], importance = TRUE, 
+               tuneGrid = data.frame(mtry = 25), 
+               trControl = trainControl(method = "cv", number = 5))
+rf.20 <- train(training[ , -55], training[ , 55], importance = TRUE, 
+               tuneGrid = data.frame(mtry = 20), 
+               trControl = trainControl(method = "cv", number = 5))
+rf.18 <- train(training[ , -55], training[ , 55], importance = TRUE, 
+               tuneGrid = data.frame(mtry = 18), 
+               trControl = trainControl(method = "cv", number = 5))
+rf.16 <- train(training[ , -55], training[ , 55], importance = TRUE, 
+               tuneGrid = data.frame(mtry = 16), 
+               trControl = trainControl(method = "cv", number = 5))
+rf.14 <- train(training[ , -55], training[ , 55], importance = TRUE, 
+               tuneGrid = data.frame(mtry = 14), 
+               trControl = trainControl(method = "cv", number = 5))
+rf.12 <- train(training[ , -55], training[ , 55], importance = TRUE, 
+               tuneGrid = data.frame(mtry = 12), 
+               trControl = trainControl(method = "cv", number = 5))
+rf.10 <- train(training[ , -55], training[ , 55], importance = TRUE, 
+               tuneGrid = data.frame(mtry = 10), 
+               trControl = trainControl(method = "cv", number = 5))
+rf.08 <- train(training[ , -55], training[ , 55], importance = TRUE, 
+               tuneGrid = data.frame(mtry = 8), 
+               trControl = trainControl(method = "cv", number = 5))
+```
+
+We compare the accuracies of the random forests, to select the best w.r.t. *accuracy* and *kappa*. As shown below, the best model is for *mtry = 18*.
+```{r echo=TRUE}
+mtry.comp <- rbind(rf.54$results, rf.35$results, rf.25$results, rf.20$results, 
+                   rf.18$results, rf.16$results, rf.14$results, rf.12$results, 
+                   rf.10$results, rf.08$results)
+mtry.comp
+rf.best <- rf.18   #best model is for mtry = 18
+```
+
+We have used cross validation to decide the model parameters (*mtry*). In the next section we will use the validation set to estimate the out of sample accuracy.
+
+The following plot shows that the 500 trees grown for the random forest above are more than enough to safely estimate the model accuracy. Actually it seems that 200 trees would have been enough.
+```{r randomforest_plot, echo=TRUE, fig.height=5}
+plot(rf.best$finalModel, main = "Random forest error")    #Figure 3
+```
+
+A list of the top predictors ranked by their **importance** follows.
+```{r echo=TRUE}
+imp <- varImp(rf.best)  #most important predictors
+imp
+```
+
+The importance of the top 10 predictors is depicted in the following plot.
+```{r importance_plot, echo=TRUE, fig.height=6}
+plot(imp, top = 10, main = "Importance of top 10 predictors")    #Figure 4
+```
+
+
+## Model Selection
+
+We will use the *validation set* to estimate the **out of sample accuracy** of:
+
+- the classification tree
+- the random forest
+
+```{r echo=TRUE, results="hold"}
+pred.ct <- predict(ctree.best, validation[ , -55])
+cm.ct <- confusionMatrix(pred.ct, validation[ , 55])
+cm.ct$overall
+cm.ct$table
+```
+
+The estimated out of sample accuracy of the classification tree is 0.958.
+
+```{r echo=TRUE, results="hold"}
+pred.rf <- predict(rf.best, validation[ , -55])
+cm.rf <- confusionMatrix(pred.rf, validation[ , 55])
+cm.rf$overall
+cm.rf$table
+```
+
+The estimated out of sample accuracy of the random forest is 0.998, which is higher.
+
+The **best** model of the two is the random forest.
+
+
+# Prediction and Results
+
+We will use the random forest to predict the class of the exercises in the test dataset.
+```{r echo=TRUE}
+pred <- predict(rf.best, testing[ , -55])
+pred
+```
+
+After submitting those results, the comparison with the **actual** values in the test dataset gives **20 correct predictions and 0 incorrect**.
+
